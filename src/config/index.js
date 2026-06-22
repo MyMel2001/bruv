@@ -15,6 +15,7 @@ const DEFAULTS = {
   // User identity
   BRUV_USER_NAME: '',
   BRUV_USER_EMAIL: '',
+  BRUV_USER_PASSWORD: '',
 
   // API server for auth & sharing
   BRUV_API_URL: 'https://api.bruv.sh',
@@ -36,6 +37,9 @@ const DEFAULTS = {
 
   // Private features
   BRUV_DEFAULT_PRIVATE: false,
+
+  // Auto-register on first private action if not authed
+  BRUV_AUTO_REGISTER: true,
 };
 
 function loadConfig() {
@@ -89,4 +93,11 @@ function getBlockedPatterns(config) {
   return config.BRUV_BLOCKED_PATTERNS.split(',').map(p => p.trim()).filter(Boolean);
 }
 
-module.exports = { BRUV_CONFIG_DIR, BRUV_CONFIG_FILE, BRUV_AUTH_FILE, DEFAULTS, loadConfig, saveAuth, loadAuth, clearAuth, getBlockedPatterns };
+/**
+ * Check if config has enough credentials for auto-register.
+ */
+function hasAutoRegisterCredentials(config) {
+  return !!(config.BRUV_USER_NAME && config.BRUV_USER_PASSWORD);
+}
+
+module.exports = { BRUV_CONFIG_DIR, BRUV_CONFIG_FILE, BRUV_AUTH_FILE, DEFAULTS, loadConfig, saveAuth, loadAuth, clearAuth, getBlockedPatterns, hasAutoRegisterCredentials };

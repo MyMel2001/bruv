@@ -482,13 +482,18 @@ class BruvRepo {
   // ---- Clone / Push / Pull ----
 
   async push(options = {}) {
-    const auth = require('../auth/manager');
-    const authMgr = new auth();
-    if (!authMgr.isAuthenticated()) {
-      throw new Error('Not authenticated. Run `bruv auth` first.');
-    }
+    const AuthManager = require('../auth/manager');
+    const authMgr = new AuthManager();
+    const repoConfig = this.getConfig();
+    let token = null;
 
-    const token = authMgr.getToken();
+    // Only require auth for private repos
+    if (repoConfig.isPrivate) {
+      await authMgr.requireAuth();
+      token = authMgr.getToken();
+    } else if (authMgr.isAuthenticated()) {
+      token = authMgr.getToken();
+    }
     const remoteUrl = options.remote || this._getRemoteUrl();
     if (!remoteUrl) throw new Error('No remote configured. Use `bruv remote add <url>` first.');
 
@@ -513,12 +518,11 @@ class BruvRepo {
     // Push to remote API
     const apiUrl = remoteUrl;
     try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
       const response = await fetch(`${apiUrl}/repo/push`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
+        headers,
         body: JSON.stringify({
           repoName: path.basename(this.repoPath),
           snapshot: this.objects.getHead()?.ref,
@@ -542,13 +546,18 @@ class BruvRepo {
   }
 
   async pull(options = {}) {
-    const auth = require('../auth/manager');
-    const authMgr = new auth();
-    if (!authMgr.isAuthenticated()) {
-      throw new Error('Not authenticated. Run `bruv auth` first.');
-    }
+    const AuthManager = require('../auth/manager');
+    const authMgr = new AuthManager();
+    const repoConfig = this.getConfig();
+    let token = null;
 
-    const token = authMgr.getToken();
+    // Only require auth for private repos
+    if (repoConfig.isPrivate) {
+      await authMgr.requireAuth();
+      token = authMgr.getToken();
+    } else if (authMgr.isAuthenticated()) {
+      token = authMgr.getToken();
+    }
     const remoteUrl = options.remote || this._getRemoteUrl();
     if (!remoteUrl) throw new Error('No remote configured.');
 

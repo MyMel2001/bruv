@@ -340,13 +340,10 @@ snapshotCmd
 program
   .command('branch-share <snapshot> <username>')
   .description('Share a private snapshot with another user (requires auth)')
-  .action((snapshot, username) => {
+  .action(async (snapshot, username) => {
     try {
       const auth = new AuthManager();
-      if (!auth.isAuthenticated()) {
-        console.error(chalk.red('✘ Not authenticated. Run `bruv auth` first.'));
-        process.exit(1);
-      }
+      await auth.requireAuth();
       const repoPath = BruvRepo.findRepo(process.cwd());
       if (!repoPath) { console.error(chalk.red('Not a bruv repository.')); process.exit(1); }
       const sm = new SnapshotManager(repoPath);
@@ -589,13 +586,10 @@ prCmd
 program
   .command('pr-share <prId> <username>')
   .description('Share a private PR with another user (requires auth)')
-  .action((prId, username) => {
+  .action(async (prId, username) => {
     try {
       const auth = new AuthManager();
-      if (!auth.isAuthenticated()) {
-        console.error(chalk.red('✘ Not authenticated. Run `bruv auth` first.'));
-        process.exit(1);
-      }
+      await auth.requireAuth();
       const repoPath = BruvRepo.findRepo(process.cwd());
       if (!repoPath) { console.error(chalk.red('Not a bruv repository.')); process.exit(1); }
       const prm = new PRManager(repoPath);

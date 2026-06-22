@@ -1,11 +1,15 @@
 const fs = require('fs');
 const path = require('path');
-const { loadConfig, saveAuth, loadAuth, clearAuth, BRUV_CONFIG_DIR } = require('../config');
+const { loadConfig, saveAuth, loadAuth, clearAuth, BRUV_CONFIG_DIR, hasAutoRegisterCredentials } = require('../config');
 
 /**
  * Authentication system for bruv.
  * Uses username/password with the bruv API server.
  * Required for private features (private repos, private PRs, sharing).
+ * 
+ * Auto-register: If the user attempts a private action without being authed,
+ * and BRUV_USER_NAME + BRUV_USER_PASSWORD are set in config,
+ * the system will automatically attempt to register (or login) before proceeding.
  */
 
 class AuthManager {
@@ -73,7 +77,6 @@ class AuthManager {
   isAuthenticated() {
     const auth = loadAuth();
     if (!auth) return false;
-    // Check if token is still valid (basic check)
     return !!auth.token;
   }
 
@@ -111,6 +114,71 @@ class AuthManager {
     const user = this.getCurrentUser();
     if (!user) return false;
     return sharedWith.includes(user.username);
+  }
+
+  /**
+   * Ensure the user is authenticated before a private action.
+   * If not authenticated, attempts auto-register using config credentials
+   * (BRUV_USER_NAME + BRUV_USER_PASSWORD). If register fails (user may
+   * already exist), falls back to login.
+   * 
+   * Returns true if authenticated (or successfully auto-registered), false otherwise.
+   */
+  async ensureAuthenticated() {
+    if (this.isAuthenticated()) return true;
+
+    // Check if auto-register is enabled and credentials are available
+    if (!this.config.BRUV_AUTO_REGISTER) {
+      return false;
+    }
+
+    if (!hasAutoRegisterCredentials(this.config)) {
+      return false;
+    }
+
+    const username = this.config.BRUV_USER_NAME;
+    const password = this.config.BRUV_USER_PASSWORD;
+    const email = this.config.BRUV_USER_EMAIL || '';
+
+    // Try register first (user may not exist yet)
+    try {
+      const result = await this.register(username, password, email);
+      if (result.success) {
+        console.log(`\x1b[32m✔ Auto-registered as ${username}\x1b[0m`);
+        return true;
+      }
+    } catch (e) {
+      // Register failed - user may already exist, try login
+    }
+
+    // Fall back to login
+    try {
+      const result = await this.login(username, password);
+      if (result.success) {
+        console.log(`\x1b[32m✔ Auto-logged in as ${username}\x1b[0m`);
+        return true;
+      }
+    } catch (e) {
+      // Login also failed
+    }
+
+    return false;
+  }
+
+  /**
+   * Require authentication for a private action.
+   * Auto-registers if possible, otherwise throws an error with instructions.
+   */
+  async requireAuth() {
+    const authed = await this.ensureAuthenticated();
+    if (authed) return true;
+
+    throw new Error(
+      'Not authenticated. Either:\n' +
+      '  1. Run `bruv auth login -u <user> -p <pass>` to authenticate\n' +
+      '  2. Set BRUV_USER_NAME and BRUV_USER_PASSWORD in ~/.config/bruv/bruv.env for auto-register\n' +
+      '  3. Run `bruv auth register -u <user> -p <pass>` to create an account'
+    );
   }
 }
 
