@@ -15,7 +15,7 @@ Git is powerful but painful. `bruv` fixes the common frustrations:
 - **Conflict-free merging** — union merge by default; when conflicts do happen, choose interactively or let AI resolve.
 - **No worktrees** — merge any snapshots simultaneously without the complexity.
 - **Simple conflict resolution** — no editing complex merge files. Pick A or B per file, or let AI decide.
-- **Built-in API server** — Express.js on port 2658 for GitHub-like app integration.
+- **Built-in API server** — Express.js on port 2658 for GitHub-like app integration (perhaps someone should make a "BruvHub"?).
 - **Auth system** — `bruv auth login` with username/password for private features.
 
 ## Install
