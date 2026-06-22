@@ -1,5 +1,5 @@
 {
-  "name": "bruv",
+  "name": "@nodemixaholic/bruv",
   "version": "0.1.0",
   "description": "A source control tool that's easier than git — with native PR support, private repos, snapshots, and AI-powered merging.",
   "main": "src/index.js",
