@@ -1,6 +1,6 @@
 {
   "name": "@nodemixaholic/bruv",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A source control tool that's easier than git — with native PR support, private repos, snapshots, and AI-powered merging.",
   "main": "src/index.js",
   "bin": {
@@ -11,7 +11,12 @@
     "server": "node src/api/server.js",
     "test": "node --test tests/**/*.test.js"
   },
-  "keywords": ["vcs", "source-control", "git-alternative", "bruv"],
+  "keywords": [
+    "vcs",
+    "source-control",
+    "git-alternative",
+    "bruv"
+  ],
   "license": "MIT",
   "dependencies": {
     "better-sqlite3": "^11.0.0",
