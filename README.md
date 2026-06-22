@@ -30,6 +30,11 @@ Or use directly:
 node bin/bruv.js --help
 ```
 
+Or simply (for latest somewhat stable):
+```bash
+npm i -g @nodemixaholic/bruv
+```
+
 ## Quick Start
 
 ```bash
@@ -89,6 +94,8 @@ BRUV_CONFLICT_STRATEGY=ask
 BRUV_BLOCK_ENV_FILES=true
 BRUV_BLOCKED_PATTERNS=.env,.env.*,*.pem,*.key,id_rsa,credentials.json,secrets.yml
 ```
+
+(see full values list at bruv.env.example file)
 
 Set config values via CLI:
 
