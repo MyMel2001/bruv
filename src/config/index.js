@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 
 const BRUV_CONFIG_DIR = path.join(os.homedir(), '.config', 'bruv');
 const BRUV_CONFIG_FILE = path.join(BRUV_CONFIG_DIR, 'bruv.env');
@@ -20,6 +21,9 @@ const DEFAULTS = {
   // API server for auth & sharing
   BRUV_API_URL: 'https://api.bruv.sh',
   BRUV_API_PORT: 2658,
+
+  // JWT secret for signing auth tokens (auto-generated if not set)
+  BRUV_JWT_SECRET: '',
 
   // AI integration for safe file detection
   BRUV_AI_ENDPOINT: '',
@@ -42,6 +46,27 @@ const DEFAULTS = {
   BRUV_AUTO_REGISTER: true,
 };
 
+/**
+ * Get or generate a persistent JWT secret.
+ * Stored in ~/.config/bruv/jwt_secret so it survives restarts.
+ */
+function getOrCreateJwtSecret(config) {
+  if (config.BRUV_JWT_SECRET) return config.BRUV_JWT_SECRET;
+
+  const secretFile = path.join(BRUV_CONFIG_DIR, 'jwt_secret');
+  if (fs.existsSync(secretFile)) {
+    return fs.readFileSync(secretFile, 'utf8').trim();
+  }
+
+  // Generate a new secret and persist it
+  const secret = crypto.randomBytes(32).toString('hex');
+  if (!fs.existsSync(BRUV_CONFIG_DIR)) {
+    fs.mkdirSync(BRUV_CONFIG_DIR, { recursive: true });
+  }
+  fs.writeFileSync(secretFile, secret, 'utf8');
+  return secret;
+}
+
 function loadConfig() {
   const config = { ...DEFAULTS };
 
@@ -62,6 +87,11 @@ function loadConfig() {
         else config[key] = value;
       }
     }
+  }
+
+  // Ensure JWT secret is available (auto-generate if not configured)
+  if (!config.BRUV_JWT_SECRET) {
+    config.BRUV_JWT_SECRET = getOrCreateJwtSecret(config);
   }
 
   return config;

@@ -4,7 +4,7 @@ const { loadConfig, saveAuth, loadAuth, clearAuth, BRUV_CONFIG_DIR, hasAutoRegis
 
 /**
  * Authentication system for bruv.
- * Uses username/password with the bruv API server.
+ * Acts as a client to the bruv API server for CLI auth operations.
  * Required for private features (private repos, private PRs, sharing).
  * 
  * Auto-register: If the user attempts a private action without being authed,
@@ -17,11 +17,23 @@ class AuthManager {
     this.config = loadConfig();
   }
 
+  /**
+   * Build the API base URL. Ensures /api is always present.
+   * If BRUV_API_URL already ends with /api, don't double it up.
+   */
+  _getApiBaseUrl() {
+    let apiUrl = this.config.BRUV_API_URL.replace(/\/+$/, ''); // strip trailing slashes
+    if (!apiUrl.endsWith('/api')) {
+      apiUrl += '/api';
+    }
+    return apiUrl;
+  }
+
   async login(username, password) {
-    const apiUrl = this.config.BRUV_API_URL;
+    const apiBase = this._getApiBaseUrl();
 
     try {
-      const response = await fetch(`${apiUrl}/auth/login`, {
+      const response = await fetch(`${apiBase}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
@@ -29,7 +41,7 @@ class AuthManager {
 
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
-        throw new Error(err.message || `Authentication failed (${response.status})`);
+        throw new Error(err.error || err.message || `Authentication failed (${response.status})`);
       }
 
       const data = await response.json();
@@ -37,17 +49,17 @@ class AuthManager {
       return { success: true, token: data.token, user: data.user };
     } catch (e) {
       if (e.code === 'ECONNREFUSED' || e.code === 'ENOTFOUND') {
-        throw new Error(`Cannot connect to bruv API at ${apiUrl}. Check BRUV_API_URL in your config.`);
+        throw new Error(`Cannot connect to bruv API at ${apiBase}. Check BRUV_API_URL in your config.`);
       }
       throw e;
     }
   }
 
   async register(username, password, email) {
-    const apiUrl = this.config.BRUV_API_URL;
+    const apiBase = this._getApiBaseUrl();
 
     try {
-      const response = await fetch(`${apiUrl}/auth/register`, {
+      const response = await fetch(`${apiBase}/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password, email }),
@@ -55,7 +67,7 @@ class AuthManager {
 
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
-        throw new Error(err.message || `Registration failed (${response.status})`);
+        throw new Error(err.error || err.message || `Registration failed (${response.status})`);
       }
 
       const data = await response.json();
@@ -63,7 +75,7 @@ class AuthManager {
       return { success: true, token: data.token, user: data.user };
     } catch (e) {
       if (e.code === 'ECONNREFUSED' || e.code === 'ENOTFOUND') {
-        throw new Error(`Cannot connect to bruv API at ${apiUrl}. Check BRUV_API_URL in your config.`);
+        throw new Error(`Cannot connect to bruv API at ${apiBase}. Check BRUV_API_URL in your config.`);
       }
       throw e;
     }
@@ -95,9 +107,9 @@ class AuthManager {
     const auth = loadAuth();
     if (!auth) return false;
 
-    const apiUrl = this.config.BRUV_API_URL;
+    const apiBase = this._getApiBaseUrl();
     try {
-      const response = await fetch(`${apiUrl}/auth/validate`, {
+      const response = await fetch(`${apiBase}/auth/validate`, {
         method: 'GET',
         headers: { Authorization: `Bearer ${auth.token}` },
       });

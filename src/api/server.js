@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
+const jwt = require('jsonwebtoken');
 
 /**
  * Express.js API server for bruv.
@@ -19,6 +20,16 @@ class BruvServer {
     this._setupRoutes();
   }
 
+  _getJwtSecret() {
+    const { loadConfig } = require('../config');
+    const config = loadConfig();
+    return config.BRUV_JWT_SECRET || 'bruv-local-dev-secret';
+  }
+
+  _issueToken(username) {
+    return jwt.sign({ username }, this._getJwtSecret(), { expiresIn: '7d' });
+  }
+
   _setupMiddleware() {
     this.app.use(cors());
     this.app.use(express.json({ limit: '50mb' }));
@@ -26,21 +37,27 @@ class BruvServer {
 
     // Auth middleware for protected endpoints
     this.app.use('/api', (req, res, next) => {
-      // Public endpoints
-      const publicPaths = ['/api/health', '/api/auth/login', '/api/auth/register'];
+      // Public endpoints (req.path is relative to the /api mount,
+      // so /health, /auth/login, /auth/register — NOT /api/health etc.)
+      const publicPaths = ['/health', '/auth/login', '/auth/register'];
       if (publicPaths.includes(req.path)) return next();
 
       // Check for auth header
       const authHeader = req.headers.authorization;
       if (!authHeader?.startsWith('Bearer ')) {
-        // Allow unauthenticated access to public repos
         req.authed = false;
         req.username = null;
       } else {
-        req.authed = true;
-        req.token = authHeader.slice(7);
-        // In production, validate token with bruv API
-        req.username = req.headers['x-bruv-user'] || null;
+        const token = authHeader.slice(7);
+        try {
+          const decoded = jwt.verify(token, this._getJwtSecret());
+          req.authed = true;
+          req.token = token;
+          req.username = decoded.username || null;
+        } catch {
+          req.authed = false;
+          req.username = null;
+        }
       }
       next();
     });
@@ -50,42 +67,105 @@ class BruvServer {
     const BruvRepo = require('../core/repo');
     const SnapshotManager = require('../snapshot/manager');
     const PRManager = require('../pr/manager');
-    const AuthManager = require('../auth/manager');
     const { loadConfig } = require('../config');
+    const { loadUsers, saveUsers, hashPassword, verifyPassword } = require('../auth/local');
+
+    // ---- Root route ----
+    this.app.get("/", (req, res) => {
+      res.json({
+        name: "bruv",
+        version: "0.1.0",
+        message: "bruv API server. All endpoints are under /api/*.",
+      });
+    });
+
 
     // ---- Health ----
     this.app.get('/api/health', (req, res) => {
       res.json({ status: 'ok', version: '0.1.0', name: 'bruv' });
     });
 
-    // ---- Auth ----
-    this.app.post('/api/auth/login', async (req, res) => {
-      try {
-        const { username, password } = req.body;
-        const auth = new AuthManager();
-        const result = await auth.login(username, password);
-        res.json(result);
-      } catch (e) {
-        res.status(401).json({ error: e.message });
-      }
-    });
-
+    // ---- Auth (local) ----
     this.app.post('/api/auth/register', async (req, res) => {
       try {
         const { username, password, email } = req.body;
-        const auth = new AuthManager();
-        const result = await auth.register(username, password, email);
-        res.json(result);
+        if (!username || !password) {
+          return res.status(400).json({ error: 'Username and password are required' });
+        }
+        if (username.length < 2) {
+          return res.status(400).json({ error: 'Username must be at least 2 characters' });
+        }
+        if (password.length < 4) {
+          return res.status(400).json({ error: 'Password must be at least 4 characters' });
+        }
+
+        const users = loadUsers();
+        if (users[username]) {
+          return res.status(409).json({ error: 'Username already exists' });
+        }
+
+        const passwordHash = hashPassword(password);
+        users[username] = {
+          username,
+          email: email || '',
+          passwordHash,
+          createdAt: new Date().toISOString(),
+        };
+        saveUsers(users);
+
+        const token = this._issueToken(username);
+        res.json({ success: true, token, user: { username, email: email || '' } });
       } catch (e) {
         res.status(400).json({ error: e.message });
       }
     });
 
+    this.app.post('/api/auth/login', async (req, res) => {
+      try {
+        const { username, password } = req.body;
+        if (!username || !password) {
+          return res.status(400).json({ error: 'Username and password are required' });
+        }
+
+        const users = loadUsers();
+        const user = users[username];
+        if (!user) {
+          return res.status(401).json({ error: 'Invalid username or password' });
+        }
+
+        if (!verifyPassword(password, user.passwordHash)) {
+          return res.status(401).json({ error: 'Invalid username or password' });
+        }
+
+        const token = this._issueToken(username);
+        res.json({ success: true, token, user: { username: user.username, email: user.email } });
+      } catch (e) {
+        res.status(401).json({ error: e.message });
+      }
+    });
+
+    this.app.get('/api/auth/validate', (req, res) => {
+      const authHeader = req.headers.authorization;
+      if (!authHeader?.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'No token provided' });
+      }
+      try {
+        const decoded = jwt.verify(authHeader.slice(7), this._getJwtSecret());
+        res.json({ valid: true, username: decoded.username });
+      } catch {
+        res.status(401).json({ error: 'Invalid or expired token' });
+      }
+    });
+
     this.app.get('/api/auth/me', (req, res) => {
-      const auth = new AuthManager();
-      const user = auth.getCurrentUser();
-      if (user) {
-        res.json({ user });
+      if (req.authed && req.username) {
+        const users = loadUsers();
+        const user = users[req.username];
+        if (user) {
+          res.json({ user: { username: user.username, email: user.email } });
+        } else {
+          res.status(401).json({ error: 'Not authenticated' });
+        }
       } else {
         res.status(401).json({ error: 'Not authenticated' });
       }
