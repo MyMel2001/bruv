@@ -1,0 +1,32 @@
+{
+  "name": "bruv",
+  "version": "0.1.0",
+  "description": "A source control tool that's easier than git — with native PR support, private repos, snapshots, and AI-powered merging.",
+  "main": "src/index.js",
+  "bin": {
+    "bruv": "./bin/bruv.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "server": "node src/api/server.js",
+    "test": "node --test tests/**/*.test.js"
+  },
+  "keywords": ["vcs", "source-control", "git-alternative", "bruv"],
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "body-parser": "^1.20.2",
+    "commander": "^12.0.0",
+    "cors": "^2.8.5",
+    "diff": "^5.2.0",
+    "dotenv": "^16.4.0",
+    "express": "^4.19.0",
+    "ignore": "^5.3.0",
+    "inquirer": "^9.2.0",
+    "jsonwebtoken": "^9.0.0",
+    "minimatch": "^9.0.0",
+    "uuid": "^9.0.0",
+    "ws": "^8.16.0",
+    "yaml": "^2.4.0"
+  }
+}
