@@ -2,8 +2,6 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { BRUV_CONFIG_DIR } = require('../config');
 
-const USERS_DB_FILE = pathModule => pathModule.join(BRUV_CONFIG_DIR, 'users.json');
-
 /**
  * Local user database for the bruv API server.
  * Stores registered users in ~/.config/bruv/users.json.

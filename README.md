@@ -246,6 +246,12 @@ bruv server
 | GET | `/api/remotes` | List remotes |
 | POST | `/api/remotes` | Add remote |
 | POST | `/api/security/scan` | Security scan files |
+| POST | `/api/repo/push` | Receive objects + update snapshot ref |
+| POST | `/api/repo/pull` | Export objects for one snapshot |
+| POST | `/api/repo/clone` | Export all snapshots + objects |
+
+Set `BRUV_ALLOWED_ROOTS` (path-delimiter separated directories) to let clients
+target a specific repo with the `X-Bruv-Repo-Path` header; other paths are rejected with 403.
 
 ## Complete Command Reference
 

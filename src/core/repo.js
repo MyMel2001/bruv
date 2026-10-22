@@ -7,7 +7,7 @@ const MergeEngine = require('../merge/engine');
 const { scanFiles, aiScanFiles } = require('../security/scanner');
 const { loadConfig } = require('../config');
 const { ensureDir, readJson, writeJson, listDirRecursive } = require('../utils/fs');
-const { shortHash } = require('../utils/hash');
+const { shortHash, hashBuffer } = require('../utils/hash');
 
 /**
  * Core repository for bruv.
@@ -220,12 +220,11 @@ class BruvRepo {
       untracked: [],
     };
 
-    // Get tracked files from HEAD
-    const trackedFiles = new Set();
+    // Get tracked files from HEAD (flatten once, no writes)
+    const trackedFiles = new Map();
     if (head?.commit?.tree) {
-      const treeEntries = this._flattenTree(head.commit.tree);
-      for (const [filePath] of treeEntries) {
-        trackedFiles.add(filePath);
+      for (const [p, info] of this._flattenTree(head.commit.tree)) {
+        trackedFiles.set(p, info);
       }
     }
 
@@ -233,13 +232,11 @@ class BruvRepo {
     const allFiles = listDirRecursive(workingDir, ['.bruv', '.git', 'node_modules', 'dist', 'build']);
     for (const file of allFiles) {
       if (staging.files[file]) continue; // Already staged
-      if (trackedFiles.has(file)) {
-        // Check if modified
-        const fullPath = path.join(workingDir, file);
-        const blobHash = this.objects.writeFileBlob(fullPath);
-        const treeEntries = head?.commit?.tree ? this._flattenTree(head.commit.tree) : new Map();
-        const tracked = treeEntries.get(file);
-        if (tracked && tracked.hash !== blobHash) {
+      const tracked = trackedFiles.get(file);
+      if (tracked) {
+        // Hash without writing to the object store
+        const blobHash = hashBuffer(fs.readFileSync(path.join(workingDir, file)));
+        if (tracked.hash !== blobHash) {
           result.modified.push(file);
         }
       } else {
@@ -248,7 +245,7 @@ class BruvRepo {
     }
 
     // Also check for deleted tracked files
-    for (const filePath of trackedFiles) {
+    for (const filePath of trackedFiles.keys()) {
       const fullPath = path.join(workingDir, filePath);
       if (!fs.existsSync(fullPath) && !staging.removed.includes(filePath)) {
         result.removed.push(filePath);
@@ -480,6 +477,15 @@ class BruvRepo {
   }
 
   // ---- Clone / Push / Pull ----
+  // Protocol: POST JSON to <remote>/api/repo/{push,pull,clone}.
+  // ponytail: every push exports the full reachable object set — no
+  // incremental negotiation yet; add when repos outgrow full export.
+
+  _apiBase(remoteUrl) {
+    // Remote URL points at the repo (e.g. http://host:3210/owner/name);
+    // API lives at <remote>/api. Strips trailing slash and legacy .git.
+    return remoteUrl.replace(/\/+$/, '').replace(/\.git$/, '') + '/api';
+  }
 
   async push(options = {}) {
     const AuthManager = require('../auth/manager');
@@ -498,11 +504,10 @@ class BruvRepo {
     if (!remoteUrl) throw new Error('No remote configured. Use `bruv remote add <url>` first.');
 
     // Security scan before push
-    const staging = this._loadStaging();
     const head = this.objects.resolveHead();
-    if (!head) throw new Error('Nothing to push. Make a commit first.');
+    if (!head?.commitHash) throw new Error('Nothing to push. Make a commit first.');
 
-    const filesToPush = head.commit?.tree ? 
+    const filesToPush = head.commit?.tree ?
       Array.from(this._flattenTree(head.commit.tree).keys()) : [];
 
     const scanResult = scanFiles(filesToPush, this.repoPath, options);
@@ -515,25 +520,27 @@ class BruvRepo {
       throw new Error('Push blocked due to potential credential files.');
     }
 
-    // Push to remote API
-    const apiUrl = remoteUrl;
+    // Export reachable objects and send them to the remote
+    const snapshot = this.objects.getHead()?.name || 'main';
+    const objects = this.objects.exportCommits([head.commitHash]);
+    const apiUrl = `${this._apiBase(remoteUrl)}/repo/push`;
     try {
       const headers = { 'Content-Type': 'application/json' };
       if (token) headers['Authorization'] = `Bearer ${token}`;
-      const response = await fetch(`${apiUrl}/repo/push`, {
+      const response = await fetch(apiUrl, {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          repoName: path.basename(this.repoPath),
-          snapshot: this.objects.getHead()?.ref,
+          snapshot,
           commitHash: head.commitHash,
-          isPrivate: readJson(path.join(this.bruvDir, 'config.json'))?.isPrivate || false,
+          objects,
+          isPrivate: repoConfig.isPrivate || false,
         }),
       });
 
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
-        throw new Error(err.message || `Push failed (${response.status})`);
+        throw new Error(err.error || err.message || `Push failed (${response.status})`);
       }
 
       return await response.json();
@@ -561,26 +568,33 @@ class BruvRepo {
     const remoteUrl = options.remote || this._getRemoteUrl();
     if (!remoteUrl) throw new Error('No remote configured.');
 
-    const apiUrl = remoteUrl;
+    const snapshot = options.snapshot || this.objects.getHead()?.name || 'main';
+    const apiUrl = `${this._apiBase(remoteUrl)}/repo/pull`;
     try {
-      const response = await fetch(`${apiUrl}/repo/pull`, {
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const response = await fetch(apiUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          repoName: path.basename(this.repoPath),
-          snapshot: this.objects.getHead()?.ref,
-        }),
+        headers,
+        body: JSON.stringify({ snapshot }),
       });
 
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
-        throw new Error(err.message || `Pull failed (${response.status})`);
+        throw new Error(err.error || err.message || `Pull failed (${response.status})`);
       }
 
-      return await response.json();
+      const data = await response.json();
+      this.objects.importObjects(data.objects || []);
+      if (data.commitHash) {
+        this.objects.writeSnapshot({
+          name: data.snapshot || snapshot,
+          commit: data.commitHash,
+          message: 'Pulled from remote',
+          author: 'remote',
+        });
+      }
+      return data;
     } catch (e) {
       if (e.code === 'ECONNREFUSED') {
         throw new Error(`Cannot connect to remote at ${apiUrl}`);
@@ -589,31 +603,44 @@ class BruvRepo {
     }
   }
 
-  async clone(remoteUrl, destPath, options = {}) {
+  static async clone(remoteUrl, destPath, options = {}) {
     const auth = require('../auth/manager');
     const authMgr = new auth();
 
     const token = authMgr.getToken();
+    const apiUrl = `${remoteUrl.replace(/\/+$/, '').replace(/\.git$/, '')}/api/repo/clone`;
     try {
-      const response = await fetch(`${remoteUrl}/repo/clone`, {
+      const response = await fetch(apiUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ repoName: path.basename(destPath) }),
+        body: JSON.stringify({}),
       });
 
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
-        throw new Error(err.message || `Clone failed (${response.status})`);
+        throw new Error(err.error || err.message || `Clone failed (${response.status})`);
       }
 
       const data = await response.json();
 
-      // Initialize local repo
+      // Initialize local repo and import everything
       BruvRepo.init(destPath, options);
       const repo = new BruvRepo(destPath);
+      repo.objects.importObjects(data.objects || []);
+      for (const [name, commitHash] of Object.entries(data.snapshots || {})) {
+        repo.objects.writeSnapshot({
+          name,
+          commit: commitHash,
+          message: 'Cloned from remote',
+          author: 'remote',
+        });
+      }
+      if (data.head?.name) repo.objects.setHead(data.head.type || 'snapshot', data.head.name);
+      const head = repo.objects.resolveHead();
+      if (head?.commit?.tree) repo.objects.checkoutTree(head.commit.tree, destPath);
 
       // Set remote
       repo.addRemote('origin', remoteUrl);
@@ -625,6 +652,34 @@ class BruvRepo {
       }
       throw e;
     }
+  }
+
+  // Line diff between two snapshots — bruv-native, no git involved.
+  diffSnapshots(fromSnapshot, toSnapshot) {
+    const { createTwoFilesPatch } = require('diff');
+    const from = this.objects.readSnapshot(fromSnapshot);
+    const to = this.objects.readSnapshot(toSnapshot);
+    if (!from) throw new Error(`Snapshot '${fromSnapshot}' not found`);
+    if (!to) throw new Error(`Snapshot '${toSnapshot}' not found`);
+
+    const fromFiles = this._flattenTree(from.commit.tree);
+    const toFiles = this._flattenTree(to.commit.tree);
+    const files = [...new Set([...fromFiles.keys(), ...toFiles.keys()])].sort();
+
+    const diffs = [];
+    for (const file of files) {
+      const a = fromFiles.get(file);
+      const b = toFiles.get(file);
+      if (a?.hash === b?.hash) continue;
+      const oldStr = a ? this.objects.readBlob(a.hash).toString('utf8') : '';
+      const newStr = b ? this.objects.readBlob(b.hash).toString('utf8') : '';
+      diffs.push({
+        file,
+        type: !a ? 'added' : !b ? 'deleted' : 'modified',
+        patch: createTwoFilesPatch(file, file, oldStr, newStr),
+      });
+    }
+    return diffs;
   }
 
   // ---- Remotes ----
@@ -705,13 +760,14 @@ class BruvRepo {
     const entries = dirMap.get(dirPath) || [];
     const subDirs = new Set();
 
+    // dirMap keys are directories only; add first relative segment of each
+    // nested key (single-level dirs like 'd' were previously dropped)
     for (const key of dirMap.keys()) {
-      if (key === dirPath) continue;
+      if (key === dirPath || key === '') continue;
       if (dirPath === '') {
-        if (key.includes('/')) subDirs.add(key.split('/')[0]);
+        subDirs.add(key.split('/')[0]);
       } else if (key.startsWith(dirPath + '/')) {
-        const rest = key.slice(dirPath.length + 1);
-        if (rest.includes('/')) subDirs.add(rest.split('/')[0]);
+        subDirs.add(key.slice(dirPath.length + 1).split('/')[0]);
       }
     }
 

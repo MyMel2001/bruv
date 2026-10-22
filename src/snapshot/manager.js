@@ -76,6 +76,15 @@ class SnapshotManager {
       metadata: { ...metadata, mergeType: 'union', mergedFrom: snapshotNames },
     });
 
+    // Actually update the target (first source) snapshot — was a no-op before.
+    this.objects.writeSnapshot({
+      name: snapshotNames[0],
+      commit: mergedCommitHash,
+      message: message || `Merge snapshots: ${snapshotNames.join(', ')}`,
+      author,
+      parent: commitHashes[0],
+    });
+
     return mergedCommitHash;
   }
 
@@ -137,14 +146,14 @@ class SnapshotManager {
     const subDirs = new Set();
 
     // Find subdirectories
-    for (const [key, _] of dirMap) {
-      if (key === dirPath) continue;
-      if (dirPath === '' ? !key.includes('/') : key.startsWith(dirPath + '/')) {
-        const rest = dirPath === '' ? key : key.slice(dirPath.length + 1);
-        const subDir = rest.split('/')[0];
-        if (rest.includes('/')) {
-          subDirs.add(subDir);
-        }
+    // dirMap keys are directories only; add first relative segment of each
+    // nested key (single-level dirs like 'd' were previously dropped)
+    for (const key of dirMap.keys()) {
+      if (key === dirPath || key === '') continue;
+      if (dirPath === '') {
+        subDirs.add(key.split('/')[0]);
+      } else if (key.startsWith(dirPath + '/')) {
+        subDirs.add(key.slice(dirPath.length + 1).split('/')[0]);
       }
     }
 

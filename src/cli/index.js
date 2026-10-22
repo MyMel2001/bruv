@@ -648,9 +648,14 @@ program
         const config = loadConfig();
         const author = config.BRUV_USER_NAME || 'unknown';
 
+        // Parents must be commit hashes, not snapshot names
+        const sourceSnap = repo.objects.readSnapshot(source);
+        const targetSnap = repo.objects.readSnapshot(target);
+        const parents = [targetSnap?.commitHash, sourceSnap?.commitHash].filter(Boolean);
+
         const mergeCommitHash = repo.objects.writeCommit({
           tree: mergedTreeHash,
-          parents: [result.mergeData.onlyA ? source : target, target],
+          parents,
           message: `Custom merge: ${source} into ${target}`,
           author,
           metadata: { mergeType: 'custom' },
@@ -730,12 +735,13 @@ program
   .command('push')
   .description('Push commits to remote')
   .option('--danger', 'Override security checks', false)
-  .option('-r, --remote <name>', 'Remote name to push to')
+  .option('-r, --remote <name>', 'Remote name or URL to push to')
   .action(async (opts) => {
     try {
       const repoPath = BruvRepo.findRepo(process.cwd());
       if (!repoPath) { console.error(chalk.red('Not a bruv repository.')); process.exit(1); }
       const repo = new BruvRepo(repoPath);
+      opts.remote = resolveRemote(repo, opts.remote);
       const result = await repo.push(opts);
       console.log(chalk.green('✔ Pushed to remote'));
     } catch (e) {
@@ -748,12 +754,13 @@ program
 program
   .command('pull')
   .description('Pull commits from remote')
-  .option('-r, --remote <name>', 'Remote name to pull from')
+  .option('-r, --remote <name>', 'Remote name or URL to pull from')
   .action(async (opts) => {
     try {
       const repoPath = BruvRepo.findRepo(process.cwd());
       if (!repoPath) { console.error(chalk.red('Not a bruv repository.')); process.exit(1); }
       const repo = new BruvRepo(repoPath);
+      opts.remote = resolveRemote(repo, opts.remote);
       const result = await repo.pull(opts);
       console.log(chalk.green('✔ Pulled from remote'));
     } catch (e) {
@@ -761,6 +768,17 @@ program
       process.exit(1);
     }
   });
+
+// `-r` accepts a remote name or a URL; names resolve via remotes.json.
+function resolveRemote(repo, remote) {
+  if (!remote || /^https?:\/\//.test(remote)) return remote;
+  const remotes = repo.listRemotes();
+  if (!remotes[remote]) {
+    console.error(chalk.red(`Remote '${remote}' not found. Known remotes: ${Object.keys(remotes).join(', ') || 'none'}`));
+    process.exit(1);
+  }
+  return remotes[remote];
+}
 
 // ========== CLONE ==========
 program

@@ -275,17 +275,15 @@ class MergeEngine {
     const entries = dirMap.get(dirPath) || [];
 
     // Find subdirectories
+    // dirMap keys are directories only; add first relative segment of each
+    // nested key (single-level dirs like 'd' were previously dropped)
     const subDirs = new Set();
     for (const key of dirMap.keys()) {
-      if (key === dirPath) continue;
+      if (key === dirPath || key === '') continue;
       if (dirPath === '') {
-        if (!key.includes('/')) continue;
         subDirs.add(key.split('/')[0]);
       } else if (key.startsWith(dirPath + '/')) {
-        const rest = key.slice(dirPath.length + 1);
-        if (rest.includes('/')) {
-          subDirs.add(rest.split('/')[0]);
-        }
+        subDirs.add(key.slice(dirPath.length + 1).split('/')[0]);
       }
     }
 

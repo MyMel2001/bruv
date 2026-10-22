@@ -1,7 +1,13 @@
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 const { hashBuffer, hashString, hashObject, shortHash } = require('../utils/hash');
 const { ensureDir } = require('../utils/fs');
+
+// Hash over the uncompressed "<type>\0<content>" payload — same as writeObject.
+function hashPayload(type, content) {
+  return hashBuffer(Buffer.concat([Buffer.from(`${type}\0`, 'utf8'), Buffer.isBuffer(content) ? content : Buffer.from(content)]));
+}
 
 /**
  * Core object model for bruv.
@@ -31,12 +37,13 @@ class BruvObjects {
 
   writeObject(type, content) {
     const header = `${type}\0`;
-    const buf = Buffer.concat([Buffer.from(header, 'utf8'), Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8')]);
-    const hash = hashBuffer(buf);
+    const raw = Buffer.concat([Buffer.from(header, 'utf8'), Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8')]);
+    // Hash stays over the uncompressed payload so it matches legacy repos.
+    const hash = hashBuffer(raw);
     const objPath = this.objectPath(hash);
     if (!fs.existsSync(objPath)) {
       ensureDir(path.dirname(objPath));
-      fs.writeFileSync(objPath, buf);
+      fs.writeFileSync(objPath, zlib.deflateSync(raw));
     }
     return hash;
   }
@@ -44,7 +51,9 @@ class BruvObjects {
   readObject(hash) {
     const objPath = this.objectPath(hash);
     if (!fs.existsSync(objPath)) return null;
-    const buf = fs.readFileSync(objPath);
+    let buf = fs.readFileSync(objPath);
+    // Legacy objects are stored raw; new ones are deflate-compressed.
+    try { buf = zlib.inflateSync(buf); } catch { /* raw legacy object */ }
     const nullIdx = buf.indexOf(0);
     const type = buf.slice(0, nullIdx).toString('utf8');
     const content = buf.slice(nullIdx + 1);
@@ -226,7 +235,7 @@ class BruvObjects {
       }
       case 'commit': {
         const commit = this.readCommit(head.name);
-        return commit ? { type: 'commit', ref: head.name, commit } : null;
+        return commit ? { type: 'commit', ref: head.name, commit, commitHash: head.name, treeHash: commit.tree } : null;
       }
       default:
         return null;
@@ -235,22 +244,24 @@ class BruvObjects {
 
   // ---- PRs ----
 
-  writePR({ title, description, sourceSnapshot, targetSnapshot, author, isPrivate = false, reviewers = [], timestamp = new Date().toISOString(), status = 'open' }) {
-    const prObj = JSON.stringify({ title, description, sourceSnapshot, targetSnapshot, author, isPrivate, reviewers, timestamp, status, comments: [] });
+  writePR(pr) {
+    // Stable id: reused on update so PR links don't break and refs don't pile up.
+    const prId = pr.id || hashString(JSON.stringify(pr)).slice(0, 7);
+    const prObj = JSON.stringify({ comments: [], reviewers: [], status: 'open', ...pr, id: prId });
     const prHash = this.writeObject('pr', prObj);
-    const refPath = path.join(this.refsDir, 'prs', prHash.slice(0, 7));
+    const refPath = path.join(this.refsDir, 'prs', prId);
     ensureDir(path.dirname(refPath));
     fs.writeFileSync(refPath, prHash, 'utf8');
     return prHash;
   }
 
   readPR(hashOrId) {
-    // Allow lookup by full hash or short ID
+    // Allow lookup by full hash or short ID (ref name)
     if (hashOrId.length < 64) {
       const prsDir = path.join(this.refsDir, 'prs');
       if (!fs.existsSync(prsDir)) return null;
       for (const file of fs.readdirSync(prsDir)) {
-        if (file.startsWith(hashOrId)) {
+        if (file === hashOrId || file.startsWith(hashOrId)) {
           hashOrId = fs.readFileSync(path.join(prsDir, file), 'utf8').trim();
           break;
         }
@@ -259,7 +270,7 @@ class BruvObjects {
     const obj = this.readObject(hashOrId);
     if (!obj || obj.type !== 'pr') return null;
     const pr = JSON.parse(obj.content.toString('utf8'));
-    return { ...pr, id: hashOrId.slice(0, 7), fullHash: hashOrId };
+    return { ...pr, id: pr.id || hashOrId.slice(0, 7), fullHash: hashOrId };
   }
 
   listPRs(status = null) {
@@ -279,10 +290,62 @@ class BruvObjects {
   updatePR(hash, updates) {
     const pr = this.readPR(hash);
     if (!pr) throw new Error(`PR ${hash} not found`);
-    Object.assign(pr, updates);
-    delete pr.id;
-    delete pr.fullHash;
-    return this.writePR(pr);
+    const { id, fullHash, ...fields } = pr;
+    const merged = { ...fields, ...updates, id, timestamp: pr.timestamp };
+    // Repoint the existing ref instead of adding a new one (no stale refs).
+    return this.writePR(merged);
+  }
+
+  // ---- Object transfer (push / pull / clone) ----
+
+  // Collect every object reachable from the given commit hashes (commits + trees + blobs).
+  collectReachable(startCommitHashes) {
+    const seen = new Set();
+    const queue = [...startCommitHashes];
+    while (queue.length > 0) {
+      const hash = queue.shift();
+      if (!hash || seen.has(hash)) continue;
+      seen.add(hash);
+      const obj = this.readObject(hash);
+      if (!obj) continue;
+      if (obj.type === 'commit') {
+        const commit = JSON.parse(obj.content.toString('utf8'));
+        queue.push(commit.tree, ...(commit.parents || []));
+      } else if (obj.type === 'tree') {
+        for (const line of obj.content.toString('utf8').trim().split('\n').filter(Boolean)) {
+          const [type, entryHash] = line.split(' ');
+          queue.push(entryHash);
+        }
+      }
+    }
+    return seen;
+  }
+
+  // Export objects reachable from the given commits as JSON-safe payloads.
+  exportCommits(commitHashes) {
+    const hashes = this.collectReachable(commitHashes);
+    const objects = [];
+    for (const hash of hashes) {
+      const obj = this.readObject(hash);
+      if (obj) objects.push({ hash, type: obj.type, content: obj.content.toString('base64') });
+    }
+    return objects;
+  }
+
+  // Import objects, verifying each hash before writing. Returns imported count.
+  importObjects(objects = []) {
+    let imported = 0;
+    for (const { hash, type, content } of objects) {
+      const buf = Buffer.from(content, 'base64');
+      if (hashPayload(type, buf) !== hash) {
+        throw new Error(`Object ${hash} failed hash verification`);
+      }
+      if (!this.objectExists(hash)) {
+        this.writeObject(type, buf);
+        imported++;
+      }
+    }
+    return imported;
   }
 
   // ---- History traversal ----

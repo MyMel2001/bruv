@@ -35,6 +35,24 @@ class BruvServer {
     this.app.use(express.json({ limit: '50mb' }));
     this.app.use(express.urlencoded({ extended: true }));
 
+    // Per-request repo selection via header (used by NodeBruv).
+    // Restricted to BRUV_ALLOWED_ROOTS (path-delimiter separated) — the header
+    // would otherwise grant arbitrary filesystem access.
+    const allowedRoots = (process.env.BRUV_ALLOWED_ROOTS || '')
+      .split(path.delimiter).filter(Boolean).map(p => path.resolve(p));
+    this.app.use((req, res, next) => {
+      const header = req.get('X-Bruv-Repo-Path');
+      if (!header) return next();
+      const resolved = path.resolve(header);
+      const allowed = allowedRoots.length > 0 &&
+        allowedRoots.some(r => resolved === r || resolved.startsWith(r + path.sep));
+      if (!allowed) {
+        return res.status(403).json({ error: 'X-Bruv-Repo-Path not allowed. Set BRUV_ALLOWED_ROOTS.' });
+      }
+      req.repoPath = resolved;
+      next();
+    });
+
     // Auth middleware for protected endpoints
     this.app.use('/api', (req, res, next) => {
       // Public endpoints (req.path is relative to the /api mount,
@@ -174,9 +192,9 @@ class BruvServer {
     // ---- Repository ----
     this.app.get('/api/repo/info', (req, res) => {
       try {
-        const repo = new BruvRepo(this.repoPath);
+        const repo = new BruvRepo(req.repoPath || this.repoPath);
         res.json({
-          name: path.basename(this.repoPath),
+          name: path.basename(req.repoPath || this.repoPath),
           config: repo.getConfig(),
           head: repo.objects.getHead(),
         });
@@ -188,7 +206,7 @@ class BruvServer {
     this.app.post('/api/repo/init', (req, res) => {
       try {
         const { private: isPrivate, remote, author, email } = req.body;
-        const repo = BruvRepo.init(this.repoPath, { private: isPrivate, remote, author, email });
+        const repo = BruvRepo.init(req.repoPath || this.repoPath, { private: isPrivate, remote, author, email });
         res.json({ success: true, message: 'Repository initialized' });
       } catch (e) {
         res.status(400).json({ error: e.message });
@@ -198,7 +216,7 @@ class BruvServer {
     // ---- Files & Staging ----
     this.app.get('/api/repo/status', (req, res) => {
       try {
-        const repo = new BruvRepo(this.repoPath);
+        const repo = new BruvRepo(req.repoPath || this.repoPath);
         const status = repo.status();
         res.json(status);
       } catch (e) {
@@ -209,7 +227,7 @@ class BruvServer {
     this.app.post('/api/repo/add', (req, res) => {
       try {
         const { files, danger } = req.body;
-        const repo = new BruvRepo(this.repoPath);
+        const repo = new BruvRepo(req.repoPath || this.repoPath);
         const count = repo.add(files, { danger });
         res.json({ success: true, filesAdded: count });
       } catch (e) {
@@ -220,7 +238,7 @@ class BruvServer {
     this.app.post('/api/repo/commit', (req, res) => {
       try {
         const { message, author } = req.body;
-        const repo = new BruvRepo(this.repoPath);
+        const repo = new BruvRepo(req.repoPath || this.repoPath);
         const result = repo.commit(message, { author });
         res.json({ success: true, ...result });
       } catch (e) {
@@ -231,7 +249,7 @@ class BruvServer {
     // ---- Commits ----
     this.app.get('/api/repo/log', (req, res) => {
       try {
-        const repo = new BruvRepo(this.repoPath);
+        const repo = new BruvRepo(req.repoPath || this.repoPath);
         const count = parseInt(req.query.count) || 50;
         const log = repo.log(count);
         res.json(log);
@@ -242,7 +260,7 @@ class BruvServer {
 
     this.app.get('/api/repo/diff', (req, res) => {
       try {
-        const repo = new BruvRepo(this.repoPath);
+        const repo = new BruvRepo(req.repoPath || this.repoPath);
         const diffs = repo.diff();
         res.json(diffs);
       } catch (e) {
@@ -253,7 +271,7 @@ class BruvServer {
     // ---- Snapshots ----
     this.app.get('/api/snapshots', (req, res) => {
       try {
-        const sm = new SnapshotManager(this.repoPath);
+        const sm = new SnapshotManager(req.repoPath || this.repoPath);
         const snapshots = sm.list().map(name => {
           const snap = sm.get(name);
           return { name, ...snap };
@@ -267,7 +285,7 @@ class BruvServer {
     this.app.post('/api/snapshots', (req, res) => {
       try {
         const { name, message, author } = req.body;
-        const repo = new BruvRepo(this.repoPath);
+        const repo = new BruvRepo(req.repoPath || this.repoPath);
         const result = repo.snapshot(name, { message, author });
         res.json({ success: true, ...result });
       } catch (e) {
@@ -278,7 +296,7 @@ class BruvServer {
     this.app.post('/api/snapshots/switch', (req, res) => {
       try {
         const { name } = req.body;
-        const repo = new BruvRepo(this.repoPath);
+        const repo = new BruvRepo(req.repoPath || this.repoPath);
         const result = repo.switchSnapshot(name);
         res.json({ success: true, snapshot: result });
       } catch (e) {
@@ -288,7 +306,7 @@ class BruvServer {
 
     this.app.delete('/api/snapshots/:name', (req, res) => {
       try {
-        const sm = new SnapshotManager(this.repoPath);
+        const sm = new SnapshotManager(req.repoPath || this.repoPath);
         const deleted = sm.delete(req.params.name);
         res.json({ success: deleted });
       } catch (e) {
@@ -300,7 +318,7 @@ class BruvServer {
     this.app.post('/api/snapshots/merge', async (req, res) => {
       try {
         const { sources, strategy, message, author } = req.body;
-        const repo = new BruvRepo(this.repoPath);
+        const repo = new BruvRepo(req.repoPath || this.repoPath);
         
         if (strategy === 'custom') {
           const result = await repo.merge(sources[0], sources[1], { strategy: 'custom' });
@@ -309,7 +327,7 @@ class BruvServer {
           const result = await repo.merge(sources[0], sources[1], { strategy: 'automated', message, author });
           res.json(result);
         } else {
-          const sm = new SnapshotManager(this.repoPath);
+          const sm = new SnapshotManager(req.repoPath || this.repoPath);
           const mergedCommitHash = sm.mergeSnapshots(sources, author || 'api', message);
           res.json({ success: true, mergeCommitHash: mergedCommitHash });
         }
@@ -323,7 +341,7 @@ class BruvServer {
       try {
         if (!req.authed) return res.status(401).json({ error: 'Authentication required' });
         const { username } = req.body;
-        const sm = new SnapshotManager(this.repoPath);
+        const sm = new SnapshotManager(req.repoPath || this.repoPath);
         sm.shareWithUser(req.params.name, username);
         res.json({ success: true });
       } catch (e) {
@@ -335,7 +353,7 @@ class BruvServer {
       try {
         if (!req.authed) return res.status(401).json({ error: 'Authentication required' });
         const { username } = req.body;
-        const sm = new SnapshotManager(this.repoPath);
+        const sm = new SnapshotManager(req.repoPath || this.repoPath);
         sm.revokeAccess(req.params.name, username);
         res.json({ success: true });
       } catch (e) {
@@ -346,7 +364,7 @@ class BruvServer {
     // ---- Tags ----
     this.app.get('/api/tags', (req, res) => {
       try {
-        const repo = new BruvRepo(this.repoPath);
+        const repo = new BruvRepo(req.repoPath || this.repoPath);
         const tags = repo.objects.listTags().map(name => {
           const tag = repo.objects.readTag(name);
           return { name, ...tag };
@@ -360,7 +378,7 @@ class BruvServer {
     this.app.post('/api/tags', (req, res) => {
       try {
         const { name, message, author } = req.body;
-        const repo = new BruvRepo(this.repoPath);
+        const repo = new BruvRepo(req.repoPath || this.repoPath);
         const result = repo.tag(name, { message, author });
         res.json({ success: true, ...result });
       } catch (e) {
@@ -371,7 +389,7 @@ class BruvServer {
     // ---- Pull Requests ----
     this.app.get('/api/prs', (req, res) => {
       try {
-        const prm = new PRManager(this.repoPath);
+        const prm = new PRManager(req.repoPath || this.repoPath);
         const status = req.query.status || null;
         const prs = prm.list(status);
         res.json(prs);
@@ -383,7 +401,7 @@ class BruvServer {
     this.app.post('/api/prs', (req, res) => {
       try {
         const { title, description, sourceSnapshot, targetSnapshot, author, isPrivate, reviewers } = req.body;
-        const prm = new PRManager(this.repoPath);
+        const prm = new PRManager(req.repoPath || this.repoPath);
         const prHash = prm.create({ title, description, sourceSnapshot, targetSnapshot, author, isPrivate, reviewers });
         res.json({ success: true, id: prHash.slice(0, 7), fullHash: prHash });
       } catch (e) {
@@ -393,7 +411,7 @@ class BruvServer {
 
     this.app.get('/api/prs/:id', (req, res) => {
       try {
-        const prm = new PRManager(this.repoPath);
+        const prm = new PRManager(req.repoPath || this.repoPath);
         const pr = prm.get(req.params.id);
         if (!pr) return res.status(404).json({ error: 'PR not found' });
         res.json(pr);
@@ -404,7 +422,7 @@ class BruvServer {
 
     this.app.post('/api/prs/:id/close', (req, res) => {
       try {
-        const prm = new PRManager(this.repoPath);
+        const prm = new PRManager(req.repoPath || this.repoPath);
         prm.close(req.params.id, req.body.closedBy || 'api');
         res.json({ success: true });
       } catch (e) {
@@ -414,7 +432,7 @@ class BruvServer {
 
     this.app.post('/api/prs/:id/reopen', (req, res) => {
       try {
-        const prm = new PRManager(this.repoPath);
+        const prm = new PRManager(req.repoPath || this.repoPath);
         prm.reopen(req.params.id);
         res.json({ success: true });
       } catch (e) {
@@ -425,7 +443,7 @@ class BruvServer {
     this.app.post('/api/prs/:id/merge', async (req, res) => {
       try {
         const { strategy, choices, author } = req.body;
-        const prm = new PRManager(this.repoPath);
+        const prm = new PRManager(req.repoPath || this.repoPath);
         const result = await prm.merge(req.params.id, author || 'api', strategy || 'union', choices);
         res.json(result);
       } catch (e) {
@@ -436,7 +454,7 @@ class BruvServer {
     this.app.post('/api/prs/:id/comment', (req, res) => {
       try {
         const { author, body } = req.body;
-        const prm = new PRManager(this.repoPath);
+        const prm = new PRManager(req.repoPath || this.repoPath);
         prm.addComment(req.params.id, author || 'api', body);
         res.json({ success: true });
       } catch (e) {
@@ -447,7 +465,7 @@ class BruvServer {
     this.app.post('/api/prs/:id/approve', (req, res) => {
       try {
         const { approver } = req.body;
-        const prm = new PRManager(this.repoPath);
+        const prm = new PRManager(req.repoPath || this.repoPath);
         prm.approve(req.params.id, approver || 'api');
         res.json({ success: true });
       } catch (e) {
@@ -460,7 +478,7 @@ class BruvServer {
       try {
         if (!req.authed) return res.status(401).json({ error: 'Authentication required' });
         const { username } = req.body;
-        const prm = new PRManager(this.repoPath);
+        const prm = new PRManager(req.repoPath || this.repoPath);
         prm.shareWithUser(req.params.id, username);
         res.json({ success: true });
       } catch (e) {
@@ -472,7 +490,7 @@ class BruvServer {
       try {
         if (!req.authed) return res.status(401).json({ error: 'Authentication required' });
         const { username } = req.body;
-        const prm = new PRManager(this.repoPath);
+        const prm = new PRManager(req.repoPath || this.repoPath);
         prm.revokeAccess(req.params.id, username);
         res.json({ success: true });
       } catch (e) {
@@ -480,22 +498,64 @@ class BruvServer {
       }
     });
 
-    // ---- Remote operations ----
-    this.app.post('/api/repo/push', async (req, res) => {
+    // ---- Remote operations (server side: receive objects, update refs) ----
+    this.app.post('/api/repo/push', (req, res) => {
       try {
-        const repo = new BruvRepo(this.repoPath);
-        const result = await repo.push(req.body);
-        res.json(result);
+        const { snapshot, commitHash, objects } = req.body;
+        if (!snapshot || !commitHash) {
+          return res.status(400).json({ error: 'snapshot and commitHash are required' });
+        }
+        const repo = new BruvRepo(req.repoPath || this.repoPath);
+        const imported = repo.objects.importObjects(objects || []);
+        if (!repo.objects.readCommit(commitHash)) {
+          return res.status(400).json({ error: 'Commit missing after object import' });
+        }
+        repo.objects.writeSnapshot({
+          name: snapshot,
+          commit: commitHash,
+          message: `Pushed to remote`,
+          author: req.username || 'remote',
+        });
+        res.json({ success: true, imported, commitHash });
       } catch (e) {
         res.status(400).json({ error: e.message });
       }
     });
 
-    this.app.post('/api/repo/pull', async (req, res) => {
+    this.app.post('/api/repo/pull', (req, res) => {
       try {
-        const repo = new BruvRepo(this.repoPath);
-        const result = await repo.pull(req.body);
-        res.json(result);
+        const repo = new BruvRepo(req.repoPath || this.repoPath);
+        const { snapshot } = req.body;
+        const name = snapshot || repo.objects.getHead()?.name || 'main';
+        const snap = repo.objects.readSnapshot(name);
+        if (!snap) return res.status(404).json({ error: `Snapshot '${name}' not found` });
+        res.json({
+          snapshot: name,
+          commitHash: snap.commitHash,
+          objects: repo.objects.exportCommits([snap.commitHash]),
+        });
+      } catch (e) {
+        res.status(400).json({ error: e.message });
+      }
+    });
+
+    this.app.post('/api/repo/clone', (req, res) => {
+      try {
+        const repo = new BruvRepo(req.repoPath || this.repoPath);
+        const snapshots = {};
+        const commitHashes = [];
+        for (const name of repo.objects.listSnapshots()) {
+          const snap = repo.objects.readSnapshot(name);
+          if (snap) {
+            snapshots[name] = snap.commitHash;
+            commitHashes.push(snap.commitHash);
+          }
+        }
+        res.json({
+          head: repo.objects.getHead(),
+          snapshots,
+          objects: repo.objects.exportCommits(commitHashes),
+        });
       } catch (e) {
         res.status(400).json({ error: e.message });
       }
@@ -504,7 +564,7 @@ class BruvServer {
     // ---- Remotes ----
     this.app.get('/api/remotes', (req, res) => {
       try {
-        const repo = new BruvRepo(this.repoPath);
+        const repo = new BruvRepo(req.repoPath || this.repoPath);
         res.json(repo.listRemotes());
       } catch (e) {
         res.status(500).json({ error: e.message });
@@ -514,7 +574,7 @@ class BruvServer {
     this.app.post('/api/remotes', (req, res) => {
       try {
         const { name, url } = req.body;
-        const repo = new BruvRepo(this.repoPath);
+        const repo = new BruvRepo(req.repoPath || this.repoPath);
         repo.addRemote(name, url);
         res.json({ success: true });
       } catch (e) {
@@ -524,7 +584,7 @@ class BruvServer {
 
     this.app.delete('/api/remotes/:name', (req, res) => {
       try {
-        const repo = new BruvRepo(this.repoPath);
+        const repo = new BruvRepo(req.repoPath || this.repoPath);
         repo.removeRemote(req.params.name);
         res.json({ success: true });
       } catch (e) {
@@ -539,7 +599,7 @@ class BruvServer {
 
     this.app.post('/api/config', (req, res) => {
       try {
-        const repo = new BruvRepo(this.repoPath);
+        const repo = new BruvRepo(req.repoPath || this.repoPath);
         const { key, value } = req.body;
         repo.setConfig(key, value);
         res.json({ success: true });
@@ -554,10 +614,10 @@ class BruvServer {
         const { files, useAI } = req.body;
         const { scanFiles, aiScanFiles } = require('../security/scanner');
         if (useAI) {
-          const result = await aiScanFiles(files, this.repoPath);
+          const result = await aiScanFiles(files, req.repoPath || this.repoPath);
           res.json(result);
         } else {
-          const result = scanFiles(files, this.repoPath);
+          const result = scanFiles(files, req.repoPath || this.repoPath);
           res.json(result);
         }
       } catch (e) {
